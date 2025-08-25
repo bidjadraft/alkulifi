@@ -24,10 +24,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install beautifulsoup4 requests
+          pip install beautifulsoup4 requests google-generativeai
 
       - name: Run FeedToFacebook.py script
         env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           FACEBOOK_TOKEN: ${{ secrets.FACEBOOK_TOKEN }}
           FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
         run: python FeedToFacebook.py || exit 0

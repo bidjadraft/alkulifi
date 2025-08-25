@@ -9,6 +9,7 @@ import time
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # إعدادات فيسبوك وقناة تيليجرام
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 FACEBOOK_TOKEN = os.getenv("FACEBOOK_TOKEN")
 FACEBOOK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID")
 TELEGRAM_URL = "https://t.me/s/alkulife"
@@ -35,20 +36,44 @@ def save_last_post_link(last_link, filepath=LAST_POST_FILE):
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(last_link)
 
-def reformat_text(text):
-    """إعادة تنسيق النص ليناسب منشورات فيسبوك."""
-    sentences = re.split(r'(?<=[.!؟])\s+', text)
-    reformatted = []
-    for sentence in sentences:
-        sentence = sentence.strip()
-        sentence = re.sub(r'([.,!?؟])([^\s])', r'\1 \2', sentence)
-        reformatted.append(sentence)
+def rephrase_text_with_gemini(text):
+    """يعيد صياغة النص باستخدام Gemini API."""
+    if not GEMINI_API_KEY:
+        logging.error("GEMINI_API_KEY غير متاح. سيتم إرسال النص الأصلي.")
+        return text
+
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+    prompt = f"أعد صياغة النص العربي التالي بأسلوب إخباري ومنظم ليناسب النشر على وسائل التواصل الاجتماعي، مع الحفاظ على المعنى الأصلي. اجعل النص مقسمًا إلى فقرات قصيرة وواضحة.\n\nالنص: {text}"
     
-    paragraphs = []
-    for i in range(0, len(reformatted), 3):
-        para = " ".join(reformatted[i:i+3])
-        paragraphs.append(para)
-    return "\n\n".join(paragraphs)
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt}
+                ]
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(api_url, json=data, headers=headers, timeout=30)
+        response.raise_for_status()
+        candidates = response.json().get('candidates', [])
+        if candidates:
+            # استخراج النص المعاد صياغته من الاستجابة
+            gemini_response_text = candidates[0]['content']['parts'][0]['text']
+            return gemini_response_text
+    except requests.exceptions.RequestException as e:
+        logging.error(f"فشل الاتصال بـ Gemini API: {e}")
+    except Exception as e:
+        logging.error(f"خطأ في معالجة استجابة Gemini: {e}")
+    
+    # في حالة الفشل، نرجع النص الأصلي
+    return text
 
 def post_to_facebook(token, page_id, message, image_url=None):
     """يرسل منشورًا إلى صفحة فيسبوك، مع أو بدون صورة."""
@@ -75,9 +100,12 @@ def post_to_facebook(token, page_id, message, image_url=None):
     except requests.exceptions.RequestException as e:
         logging.error(f"فشل النشر على فيسبوك: {e}")
         return False
+    except Exception as e:
+        logging.error(f"خطأ فيسبوك: {e}")
+        return False
 
 def fetch_and_post_latest_posts():
-    """يجلب المنشورات الجديدة من تيليجرام وينشرها على فيسبوك."""
+    """يجلب المنشورات الجديدة من تيليجرام ويعيد صياغتها وينشرها على فيسبوك."""
     try:
         response = requests.get(TELEGRAM_URL)
         response.raise_for_status()
@@ -89,7 +117,6 @@ def fetch_and_post_latest_posts():
     last_link = read_last_post_link(LAST_POST_FILE)
     messages = soup.find_all('div', class_='tgme_widget_message_wrap')
     
-    # فلترة المنشورات
     filtered_msgs = []
     for msg in messages:
         text_div = msg.find('div', class_='tgme_widget_message_text')
@@ -146,15 +173,18 @@ def fetch_and_post_latest_posts():
     posts_to_process.reverse() 
     
     for post in posts_to_process:
-        reformatted_text = reformat_text(post['content'])
+        # إعادة صياغة النص باستخدام Gemini
+        rephrased_text = rephrase_text_with_gemini(post['content'])
+        
         logging.info(f"\n--- منشور جديد ---")
         logging.info(f"الرابط: {post['link']}")
-        logging.info(f"النص:\n{reformatted_text}")
+        logging.info(f"النص الأصلي:\n{post['content']}")
+        logging.info(f"النص المعاد صياغته:\n{rephrased_text}")
         if post['image']:
             logging.info(f"الصورة: {post['image']}")
         
         # إرسال المنشور إلى فيسبوك
-        success = post_to_facebook(FACEBOOK_TOKEN, FACEBOOK_PAGE_ID, reformatted_text, post['image'])
+        success = post_to_facebook(FACEBOOK_TOKEN, FACEBOOK_PAGE_ID, rephrased_text, post['image'])
         if success:
             save_last_post_link(post['link'])
             logging.info("تم حفظ آخر منشور تم نشره بنجاح.")

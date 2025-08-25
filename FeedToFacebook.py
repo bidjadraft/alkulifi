@@ -14,6 +14,7 @@ FACEBOOK_TOKEN = os.getenv("FACEBOOK_TOKEN")
 FACEBOOK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID")
 TELEGRAM_URL = "https://t.me/s/alkulife"
 LAST_POST_FILE = "lastpost.txt"
+MAX_RETRIES = 5  # عدد المحاولات الأقصى في حالة الفشل
 
 def clean_content_text_only(soup_element):
     """يستخرج النص النقي من عنصر BeautifulSoup."""
@@ -37,10 +38,10 @@ def save_last_post_link(last_link, filepath=LAST_POST_FILE):
         f.write(last_link)
 
 def rephrase_text_with_gemini(text):
-    """يعيد صياغة النص باستخدام Gemini API."""
+    """يعيد صياغة النص باستخدام Gemini API مع إعادة المحاولة."""
     if not GEMINI_API_KEY:
-        logging.error("GEMINI_API_KEY غير متاح. سيتم إرسال النص الأصلي.")
-        return text
+        logging.error("GEMINI_API_KEY غير متاح. لا يمكن إعادة الصياغة.")
+        return None
 
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
     prompt = f"أعد صياغة النص العربي التالي بأسلوب إخباري ومنظم ليناسب النشر على وسائل التواصل الاجتماعي، مع الحفاظ على المعنى الأصلي. اجعل النص مقسمًا إلى فقرات قصيرة وواضحة.\n\nالنص: {text}"
@@ -59,53 +60,63 @@ def rephrase_text_with_gemini(text):
         ]
     }
 
-    try:
-        response = requests.post(api_url, json=data, headers=headers, timeout=30)
-        response.raise_for_status()
-        candidates = response.json().get('candidates', [])
-        if candidates:
-            # استخراج النص المعاد صياغته من الاستجابة
-            gemini_response_text = candidates[0]['content']['parts'][0]['text']
-            return gemini_response_text
-    except requests.exceptions.RequestException as e:
-        logging.error(f"فشل الاتصال بـ Gemini API: {e}")
-    except Exception as e:
-        logging.error(f"خطأ في معالجة استجابة Gemini: {e}")
-    
-    # في حالة الفشل، نرجع النص الأصلي
-    return text
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.post(api_url, json=data, headers=headers, timeout=30)
+            response.raise_for_status()
+            candidates = response.json().get('candidates', [])
+            if candidates:
+                gemini_response_text = candidates[0]['content']['parts'][0]['text']
+                logging.info(f"نجحت إعادة الصياغة مع Gemini في المحاولة رقم {attempt + 1}.")
+                return gemini_response_text
+        except requests.exceptions.RequestException as e:
+            logging.warning(f"فشل الاتصال بـ Gemini API في المحاولة {attempt + 1}: {e}")
+        except Exception as e:
+            logging.warning(f"خطأ في معالجة استجابة Gemini في المحاولة {attempt + 1}: {e}")
+        
+        time.sleep(5) # انتظار 5 ثوانٍ قبل إعادة المحاولة
+
+    logging.error(f"فشلت إعادة صياغة النص بعد {MAX_RETRIES} محاولات. سيتم تخطي هذا المنشور.")
+    return None
 
 def post_to_facebook(token, page_id, message, image_url=None):
-    """يرسل منشورًا إلى صفحة فيسبوك، مع أو بدون صورة."""
-    try:
-        if image_url:
-            url = f"https://graph.facebook.com/v12.0/{page_id}/photos"
-            data = {
-                "url": image_url,
-                "published": "true",
-                "access_token": token,
-                "caption": message
-            }
-            r = requests.post(url, data=data)
-        else:
-            url = f"https://graph.facebook.com/v12.0/{page_id}/feed"
-            data = {
-                "message": message,
-                "access_token": token
-            }
-            r = requests.post(url, data=data)
-        r.raise_for_status()
-        logging.info("تم النشر على فيسبوك بنجاح. 👍")
-        return True
-    except requests.exceptions.RequestException as e:
-        logging.error(f"فشل النشر على فيسبوك: {e}")
-        return False
-    except Exception as e:
-        logging.error(f"خطأ فيسبوك: {e}")
-        return False
+    """يرسل منشورًا إلى صفحة فيسبوك مع إعادة المحاولة."""
+    for attempt in range(MAX_RETRIES):
+        try:
+            if image_url:
+                url = f"https://graph.facebook.com/v12.0/{page_id}/photos"
+                data = {
+                    "url": image_url,
+                    "published": "true",
+                    "access_token": token,
+                    "caption": message
+                }
+                r = requests.post(url, data=data)
+            else:
+                url = f"https://graph.facebook.com/v12.0/{page_id}/feed"
+                data = {
+                    "message": message,
+                    "access_token": token
+                }
+                r = requests.post(url, data=data)
+            r.raise_for_status()
+            logging.info(f"تم النشر على فيسبوك بنجاح في المحاولة رقم {attempt + 1}. 👍")
+            return True
+        except requests.exceptions.RequestException as e:
+            logging.warning(f"فشل النشر على فيسبوك في المحاولة {attempt + 1}: {e}")
+            if r.status_code == 400 or r.status_code == 403: # أخطاء قد لا تفيد فيها إعادة المحاولة
+                 logging.error(f"خطأ فيسبوك {r.status_code}، لن يتم إعادة المحاولة.")
+                 break
+        except Exception as e:
+            logging.warning(f"خطأ فيسبوك في المحاولة {attempt + 1}: {e}")
+
+        time.sleep(5) # انتظار 5 ثوانٍ قبل إعادة المحاولة
+
+    logging.error(f"فشل النشر على فيسبوك بعد {MAX_RETRIES} محاولات.")
+    return False
 
 def fetch_and_post_latest_posts():
-    """يجلب المنشورات الجديدة من تيليجرام ويعيد صياغتها وينشرها على فيسبوك."""
+    """يجلب المنشورات الجديدة، يعيد صياغتها، وينشرها على فيسبوك."""
     try:
         response = requests.get(TELEGRAM_URL)
         response.raise_for_status()
@@ -122,20 +133,16 @@ def fetch_and_post_latest_posts():
         text_div = msg.find('div', class_='tgme_widget_message_text')
         if not text_div:
             continue
-        
         text_content = text_div.get_text()
         if '👇' in text_content or msg.find('audio') or msg.find('video'):
             continue
-        
         excluded_exts = ['mp3', 'ogg', 'wav', 'mp4', 'mov', 'avi', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'zip', 'rar']
         links = msg.find_all('a')
         if any(any(a.get('href', '').lower().endswith(ext) for ext in excluded_exts) for a in links):
             continue
-        
         filtered_msgs.append(msg)
 
-    # المنشورات الأحدث أولًا
-    filtered_msgs.reverse()
+    filtered_msgs.reverse() # المنشورات الأحدث أولًا
     
     posts_to_process = []
     for msg in filtered_msgs:
@@ -147,7 +154,6 @@ def fetch_and_post_latest_posts():
         
         text_div = msg.find('div', class_='tgme_widget_message_text')
         content_text = clean_content_text_only(text_div)
-        
         if not is_meaningful_text(content_text):
             continue
 
@@ -158,7 +164,6 @@ def fetch_and_post_latest_posts():
             m = re.search(r"background-image:url\('([^']+)'\)", style)
             if m:
                 image_url = m.group(1)
-
         posts_to_process.append({
             'link': post_link,
             'content': content_text,
@@ -169,29 +174,29 @@ def fetch_and_post_latest_posts():
         logging.info("لا توجد منشورات جديدة للنشر.")
         return
 
-    # النشر بترتيب زمني صحيح (من الأقدم إلى الأحدث)
-    posts_to_process.reverse() 
+    posts_to_process.reverse() # النشر بترتيب زمني صحيح
     
     for post in posts_to_process:
-        # إعادة صياغة النص باستخدام Gemini
+        # 1. إعادة صياغة النص مع المحاولات
         rephrased_text = rephrase_text_with_gemini(post['content'])
+        if rephrased_text is None:
+            # إذا فشلت إعادة الصياغة بعد كل المحاولات، نتوقف ولا ننشر
+            logging.error("فشلت إعادة صياغة النص، سيتم إيقاف العملية.")
+            return # إيقاف البرنامج
         
-        logging.info(f"\n--- منشور جديد ---")
-        logging.info(f"الرابط: {post['link']}")
-        logging.info(f"النص الأصلي:\n{post['content']}")
-        logging.info(f"النص المعاد صياغته:\n{rephrased_text}")
-        if post['image']:
-            logging.info(f"الصورة: {post['image']}")
-        
-        # إرسال المنشور إلى فيسبوك
+        # 2. النشر على فيسبوك مع المحاولات
         success = post_to_facebook(FACEBOOK_TOKEN, FACEBOOK_PAGE_ID, rephrased_text, post['image'])
+        
+        # 3. تحديث الرابط فقط إذا نجحت كلتا العمليتين
         if success:
             save_last_post_link(post['link'])
             logging.info("تم حفظ آخر منشور تم نشره بنجاح.")
         else:
-            logging.error("فشل النشر، لم يتم تحديث ملف آخر منشور.")
+            # إذا فشل النشر على فيسبوك، نتوقف
+            logging.error("فشل النشر على فيسبوك، سيتم إيقاف العملية.")
+            return # إيقاف البرنامج
         
-        time.sleep(10) # انتظار 10 ثوانٍ قبل المنشور التالي لتجنب حظر API
+        time.sleep(10) # انتظار 10 ثوانٍ قبل المنشور التالي
 
 if __name__ == "__main__":
     fetch_and_post_latest_posts()
